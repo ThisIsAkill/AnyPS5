@@ -871,6 +871,7 @@ private:
             auto& image = m_info.images[i];
             if (image.source == source && image.resourceClass == resourceClass && image.dimension == memory.imageDimension && image.mipMode == mip && image.depthCompare == depth && image.r128 == memory.imageR128) {
                 Merge(image, op, pc);
+                MergeCompare(image, memory, op);
                 return i;
             }
         }
@@ -886,8 +887,16 @@ private:
         image.depthCompare = depth;
         image.r128 = memory.imageR128;
         Merge(image, op, pc);
+        MergeCompare(image, memory, op);
         m_info.images.push_back(image);
         return static_cast<std::uint32_t>(m_info.images.size() - 1);
+    }
+
+    static void MergeCompare(ImageResource& image, const MemoryInfo& memory, IrOpcode op) {
+        if ((memory.imageSampleFlags & RdnaImageSampleFlagCompare) == 0) return;
+        image.compareSampleFlags |= memory.imageSampleFlags;
+        image.compareAnyLevel = image.compareAnyLevel || (memory.imageSampleFlags & RdnaImageSampleFlagLevelZero) == 0;
+        image.compareGather = image.compareGather || op == IrOpcode::ImageGatherRaw;
     }
 
     static void Merge(ImageResource& image, IrOpcode op, std::uint32_t pc) {

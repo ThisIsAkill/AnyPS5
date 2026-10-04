@@ -31,6 +31,7 @@ struct ResourceSpecialization {
         bool fmask = false;
         bool depthBits = false;
         bool depthUnorm16 = false;
+        std::uint32_t emulatedCompare = 0;
 
         bool operator==(const Image& other) const;
     };

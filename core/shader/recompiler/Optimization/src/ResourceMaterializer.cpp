@@ -3,6 +3,7 @@
 #include "IntermediateRepresentation/IrBuilder.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
+#include "RdnaDecoder/RdnaInstruction.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -15,6 +16,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -488,6 +490,89 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
     snapshot.samplers.assign(values.begin() + cursor, values.begin() + cursor + plan.info.samplers.size());
 }
 
+// A compare-sampled color view outside what the shader emulation implements keeps the driver's
+// fallback binding (the color image under the comparison sampler, whose result Vulkan leaves to the
+// driver). Said once per reason.
+std::uint32_t colorCompareFallback(const std::string& reason) {
+    static std::mutex reportedMutex;
+    static std::set<std::string> reported;
+    std::lock_guard lock(reportedMutex);
+    if (reported.insert(reason).second) std::fprintf(stderr, "[shader] comparison sampling of a color texture %s is not emulated; it keeps the color image fallback\n", reason.c_str());
+    return 0u;
+}
+
+std::optional<std::uint32_t> colorCompareReference(IrBufferFormat format) {
+    switch (format) {
+    case IrBufferFormat::Format8UNorm: case IrBufferFormat::Format8_8UNorm: case IrBufferFormat::Format16_16UNorm:
+    case IrBufferFormat::Format11_11_10UNorm: case IrBufferFormat::Format10_11_11UNorm: case IrBufferFormat::Format2_10_10_10UNorm:
+    case IrBufferFormat::Format10_10_10_2UNorm: case IrBufferFormat::Format8_8_8_8UNorm: case IrBufferFormat::Format16_16_16_16UNorm:
+        return EmulatedCompare::ReferenceUnorm;
+    case IrBufferFormat::Format8SNorm: case IrBufferFormat::Format16SNorm: case IrBufferFormat::Format8_8SNorm: case IrBufferFormat::Format16_16SNorm:
+    case IrBufferFormat::Format11_11_10SNorm: case IrBufferFormat::Format10_11_11SNorm: case IrBufferFormat::Format2_10_10_10SNorm:
+    case IrBufferFormat::Format10_10_10_2SNorm: case IrBufferFormat::Format8_8_8_8SNorm: case IrBufferFormat::Format16_16_16_16SNorm:
+        return EmulatedCompare::ReferenceSnorm;
+    case IrBufferFormat::Format16Float: case IrBufferFormat::Format16_16Float: case IrBufferFormat::Format11_11_10Float:
+    case IrBufferFormat::Format10_11_11Float: case IrBufferFormat::Format32_32Float: case IrBufferFormat::Format16_16_16_16Float:
+        return EmulatedCompare::ReferenceFloat;
+    default:
+        return std::nullopt;
+    }
+}
+
+std::uint32_t emulatedCompareState(const IrResourcePlan& plan, const ResourceSnapshot& snapshot, std::uint32_t index) {
+    const auto& image = plan.info.images[index];
+    const auto& descriptor = snapshot.images[index];
+    if (!image.depthCompare || descriptor.dwordCount != 8u || nullImageDescriptor(descriptor)) return 0u;
+    const auto format = rawImageFormat(descriptor);
+    if (format == IrBufferFormat::Format32Float || format == IrBufferFormat::Format16UNorm || IsDepthBitsTexture(descriptor.dwords[1], descriptor.dwords[3])) return 0u;
+    const auto reference = colorCompareReference(format);
+    if (!reference.has_value()) return colorCompareFallback("in a format other than float, unorm or snorm (format " + std::to_string(static_cast<std::uint32_t>(format)) + ")");
+    const auto type = rawImageType(descriptor);
+    if (type != ImageType::Color2D && type != ImageType::Color2DArray) return colorCompareFallback("through a view other than 2D or 2D array");
+    if ((descriptorImageSwizzle(descriptor) & 0x7u) != 4u) return colorCompareFallback("through a view whose X channel is not red");
+    if (image.indirectRoot != ImageResource::NoIndirectImage) return colorCompareFallback("through a bindless image table");
+    if (image.compareGather) return colorCompareFallback("in a gather");
+    if ((image.compareSampleFlags & (RdnaImageSampleFlagDerivative | RdnaImageSampleFlagCd | RdnaImageSampleFlagLod)) != 0u) return colorCompareFallback("with gradients or an explicit LOD");
+    if ((image.compareSampleFlags & (RdnaImageSampleFlagBias | RdnaImageSampleFlagOffset | RdnaImageSampleFlagLodClamp)) != 0u) return colorCompareFallback("with an LOD bias, texel offset or LOD clamp");
+    std::optional<std::uint32_t> samplerState;
+    for (const auto& pair : plan.info.sampledPairs) {
+        if (pair.image != index) continue;
+        if (pair.sampler >= snapshot.samplers.size() || snapshot.samplers[pair.sampler].dwordCount != 4u) throw std::runtime_error("comparison sampling of a color texture has no sampler descriptor");
+        const auto& words = snapshot.samplers[pair.sampler].dwords;
+        const auto clampX = words[0] & 0x7u;
+        const auto clampY = (words[0] >> 3u) & 0x7u;
+        const auto function = (words[0] >> 12u) & 0x7u;
+        const bool unnormalized = ((words[0] >> 15u) & 0x1u) != 0u;
+        const auto lodBias = words[2] & 0x3fffu;
+        const auto magFilter = (words[2] >> 20u) & 0x3u;
+        const auto minFilter = (words[2] >> 22u) & 0x3u;
+        const auto addressMode = [](std::uint32_t clamp) -> std::optional<std::uint32_t> {
+            if (clamp == 0u) return EmulatedCompare::AddressWrap;
+            if (clamp == 2u) return EmulatedCompare::AddressEdge;
+            if (clamp == 6u) return EmulatedCompare::AddressBorder;
+            return std::nullopt;
+        };
+        const auto modeX = addressMode(clampX);
+        const auto modeY = addressMode(clampY);
+        if (!modeX.has_value() || !modeY.has_value()) return colorCompareFallback("with addressing other than wrap, clamp-to-edge or clamp-to-border");
+        const auto addressX = *modeX;
+        const auto addressY = *modeY;
+        const auto borderType = (words[3] >> 30u) & 0x3u;
+        const bool border = addressX == EmulatedCompare::AddressBorder || addressY == EmulatedCompare::AddressBorder;
+        if (border && borderType == 3u) return colorCompareFallback("with a border color table");
+        if (magFilter != minFilter || magFilter > 1u) return colorCompareFallback("with filters other than equal point or bilinear minification and magnification");
+        if (unnormalized || lodBias != 0u) return colorCompareFallback("with unnormalized coordinates or an LOD bias");
+        const auto state = EmulatedCompare::Enabled | (function << EmulatedCompare::FunctionShift) | (magFilter == 1u ? EmulatedCompare::Linear : 0u)
+            | (addressX << EmulatedCompare::ClampXShift) | (addressY << EmulatedCompare::ClampYShift) | (border && borderType == 2u ? EmulatedCompare::BorderWhite : 0u);
+        if (samplerState.has_value() && *samplerState != state) return colorCompareFallback("through samplers that disagree");
+        samplerState = state;
+    }
+    if (!samplerState.has_value()) throw std::runtime_error("comparison sampling of a color texture has no paired sampler");
+    const bool singleLevel = ((descriptor.dwords[3] >> 12u) & 0xfu) == ((descriptor.dwords[3] >> 16u) & 0xfu);
+    if (image.compareAnyLevel && !singleLevel) return colorCompareFallback("across mip levels");
+    return *samplerState | (*reference << EmulatedCompare::ReferenceShift) | (singleLevel ? EmulatedCompare::SingleLevel : 0u);
+}
+
 void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& snapshot, const std::vector<TableResolution>& tables, ResourceSpecialization& specialization) {
     ResourceSpecialization result;
     result.buffers.reserve(plan.info.buffers.size());
@@ -533,6 +618,7 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
         entry.fmask = decoded.fmask;
         entry.depthBits = decoded.depthBits;
         entry.depthUnorm16 = decoded.depthUnorm16;
+        entry.emulatedCompare = emulatedCompareState(plan, snapshot, i);
         result.images.push_back(entry);
     }
 
@@ -619,6 +705,8 @@ void ResourceMaterializer::Apply(IrProgram& program, const ResourceSpecializatio
         image.cube = source.cube;
         image.depthBits = source.depthBits;
         image.depthUnorm16 = source.depthUnorm16;
+        image.emulatedCompare = source.emulatedCompare;
+        if ((source.emulatedCompare & EmulatedCompare::Enabled) != 0u) image.depthCompare = false;
         image.indirectResources.clear();
     }
     for (std::uint32_t index = 0; index < images.size(); index++) {
@@ -884,7 +972,7 @@ bool ResourceSpecialization::Buffer::operator==(const Buffer& other) const {
 }
 
 bool ResourceSpecialization::Image::operator==(const Image& other) const {
-    return numericClass == other.numericClass && dimension == other.dimension && mipCount == other.mipCount && conversionFormat == other.conversionFormat && shaderSwizzle == other.shaderSwizzle && indirectRoot == other.indirectRoot && indirectMappingOffset == other.indirectMappingOffset && indirectSearchIterations == other.indirectSearchIterations && cube == other.cube && fmask == other.fmask && depthBits == other.depthBits && depthUnorm16 == other.depthUnorm16;
+    return numericClass == other.numericClass && dimension == other.dimension && mipCount == other.mipCount && conversionFormat == other.conversionFormat && shaderSwizzle == other.shaderSwizzle && indirectRoot == other.indirectRoot && indirectMappingOffset == other.indirectMappingOffset && indirectSearchIterations == other.indirectSearchIterations && cube == other.cube && fmask == other.fmask && depthBits == other.depthBits && depthUnorm16 == other.depthUnorm16 && emulatedCompare == other.emulatedCompare;
 }
 
 bool ResourceSpecialization::operator==(const ResourceSpecialization& other) const {
