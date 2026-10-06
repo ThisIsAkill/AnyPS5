@@ -268,7 +268,29 @@ void ChargedBytes() {
     Expect(ChargedTextureBytes(64 * MiB, 0) == 64 * MiB, "a texture that does not know its allocation is charged the guest size");
 }
 
+void TopMipCap() {
+    Expect(!ParseTopMipSkip(nullptr).has_value() && !ParseTopMipSkip("").has_value(), "the cap is off when the setting is unset or empty");
+    Expect(!ParseTopMipSkip("0").has_value() && !ParseTopMipSkip("abc").has_value() && !ParseTopMipSkip("4x").has_value() && !ParseTopMipSkip("-4").has_value(), "zero and malformed settings leave the cap off");
+    Expect(ParseTopMipSkip("4") == 4 * MiB, "the setting is a threshold in MiB");
+    Expect(!ParseTopMipSkip("99999999999999999999").has_value(), "an overflowing setting leaves the cap off");
+    const TopMipFacts big{false, true, 12, 11, 8 * MiB};
+    Expect(TopMipsToSkip(big, std::nullopt) == 0u, "nothing is skipped while the cap is off");
+    Expect(TopMipsToSkip(big, 4 * MiB) == 1u, "a texture larger than the threshold loses its top mip");
+    Expect(TopMipsToSkip(big, 8 * MiB) == 0u, "a texture exactly at the threshold keeps it");
+    TopMipFacts small = big; small.guestBytes = 2 * MiB;
+    Expect(TopMipsToSkip(small, 4 * MiB) == 0u, "a texture under the threshold keeps its top mip");
+    TopMipFacts depth = big; depth.depthCompare = true;
+    Expect(TopMipsToSkip(depth, 4 * MiB) == 0u, "a depth comparison texture is not reduced");
+    TopMipFacts volume = big; volume.twoDimensional = false;
+    Expect(TopMipsToSkip(volume, 4 * MiB) == 0u, "3D and cube textures are not reduced");
+    TopMipFacts single = big; single.mipCount = 1;
+    Expect(TopMipsToSkip(single, 4 * MiB) == 0u, "a texture with one level has nothing to drop");
+    TopMipFacts topOnly = big; topOnly.lastLevel = 0;
+    Expect(TopMipsToSkip(topOnly, 4 * MiB) == 0u, "a view that reads only the top level keeps it");
+}
+
 int main() {
+    TopMipCap();
     ChargedBytes();
     NeverEvictsEntriesUsedThisFrame();
     EvictsOnlyAgedEntriesUnderSoftPressure();

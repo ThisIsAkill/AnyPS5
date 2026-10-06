@@ -1,4 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureResidency.hpp"
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include <algorithm>
 #include <array>
@@ -82,6 +85,26 @@ std::uint64_t DeviceHardLimit(const DeviceMemoryBudget& budget, std::uint64_t he
     const auto ceiling = cacheDeviceBytes + budget.budget;
     const auto taken = budget.usage + headroom;
     return ceiling > taken ? ceiling - taken : 0;
+}
+
+std::optional<std::uint64_t> ParseTopMipSkip(const char* text) {
+    if (text == nullptr || text[0] == '\0') return std::nullopt;
+    char* end = nullptr;
+    errno = 0;
+    const auto mib = std::strtoull(text, &end, 10);
+    if (end == text || *end != '\0' || errno != 0 || mib == 0 || mib > (std::numeric_limits<std::uint64_t>::max() >> 20u)) return std::nullopt;
+    return mib << 20u;
+}
+
+std::optional<std::uint64_t> TopMipSkipBytes() {
+    static const std::optional<std::uint64_t> bytes = ParseTopMipSkip(std::getenv("APS5_TEXTURE_SKIP_TOP_MIP_MIB"));
+    return bytes;
+}
+
+std::uint32_t TopMipsToSkip(const TopMipFacts& facts, std::optional<std::uint64_t> thresholdBytes) {
+    if (!thresholdBytes.has_value() || facts.depthCompare || !facts.twoDimensional) return 0u;
+    if (facts.mipCount < 2u || facts.lastLevel < 1u) return 0u;
+    return facts.guestBytes > *thresholdBytes ? 1u : 0u;
 }
 
 std::uint64_t ChargedTextureBytes(std::uint64_t guestBytes, std::uint64_t allocationBytes) {

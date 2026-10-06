@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureResidency.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthTarget.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
@@ -304,17 +305,29 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
 
         const auto guestBytes = geometry.guestBytes;
         Require(snapshot.size() == guestBytes, "texture snapshot size mismatch");
-
         const auto sliceLinearBytes = geometry.sliceLinearBytes;
         Require(arrayLayers == 0 || sliceLinearBytes <= UINT64_MAX / arrayLayers, "detiled texture buffer size overflows");
         const auto linearBytes = sliceLinearBytes * arrayLayers;
+
+        // APS5_TEXTURE_SKIP_TOP_MIP_MIB (off by default, see TopMipsToSkip): a large 2D or 2D array texture whose view reaches
+        // a lower level starts at guest level 1, so its image holds a quarter of the memory; the view's levels and the
+        // sampler's minimum LOD move down by one. A shader's texture size query then reports the reduced size.
+        const std::uint32_t skip = TopMipsToSkip({depthCompare, descriptor.dimension == TextureDimension::k2D || descriptor.dimension == TextureDimension::k2DArray,
+            descriptor.mipCount, descriptor.lastLevel, static_cast<std::uint64_t>(guestBytes)}, TopMipSkipBytes());
+        if (skip != 0u) {
+            static std::atomic<std::uint64_t> skipped{0}, saved{0};
+            const auto count = ++skipped;
+            saved += mips[0].linearSize * geometry.layers;
+            if (count <= 8u || count % 1000u == 0u) std::fprintf(stderr, "[textures] %llu large textures created without their top mip (%.0f MiB of top mips not created, counted at every creation); last 0x%llx %ux%u, %.1f MiB\n",
+                static_cast<unsigned long long>(count), saved.load() / 1048576.0, static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, guestBytes / 1048576.0);
+        }
 
         VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         imageInfo.flags = descriptor.dimension == TextureDimension::kCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u;
         imageInfo.imageType = ImageTypeFor(descriptor.dimension);
         imageInfo.format = vkFormat;
-        imageInfo.extent = {descriptor.width, descriptor.height, geometry.imageDepth};
-        imageInfo.mipLevels = descriptor.mipCount;
+        imageInfo.extent = {std::max(descriptor.width >> skip, 1u), std::max(descriptor.height >> skip, 1u), geometry.imageDepth};
+        imageInfo.mipLevels = descriptor.mipCount - skip;
         imageInfo.arrayLayers = geometry.imageLayers;
         imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -410,21 +423,21 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             toTransferDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toTransferDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toTransferDst.image = image;
-            toTransferDst.subresourceRange = {aspect, 0, descriptor.mipCount, 0, geometry.imageLayers};
+            toTransferDst.subresourceRange = {aspect, 0, descriptor.mipCount - skip, 0, geometry.imageLayers};
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &linearReadBarrier, 1, &toTransferDst);
 
             std::vector<VkBufferImageCopy> regions;
             regions.reserve(static_cast<std::size_t>(arrayLayers) * mips.size());
             for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
                 const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
-                for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
+                for (std::uint32_t level = skip; level < descriptor.mipCount; ++level) {
                     if (!geometry.HasLayer(level, layer)) continue;
                     const auto& mip = mips[level];
                     VkBufferImageCopy region{};
                     region.bufferOffset = linearLayerOffset + mip.linearOffset;
                     region.bufferRowLength = mip.pitchBytes / BytesPerElement(descriptor.format) * BlockWidth(descriptor.format);
                     region.bufferImageHeight = 0;
-                    region.imageSubresource = {aspect, level, geometry.CopyLayer(layer), 1};
+                    region.imageSubresource = {aspect, level - skip, geometry.CopyLayer(layer), 1};
                     region.imageOffset = {0, 0, geometry.CopyDepth(layer)};
                     region.imageExtent = {std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), 1u};
                     regions.push_back(region);
@@ -472,7 +485,8 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             }
         }
 
-        const auto viewLevelCount = std::min(descriptor.lastLevel, descriptor.mipCount - 1u) - descriptor.baseLevel + 1u;
+        const auto viewBase = std::max(descriptor.baseLevel, skip);
+        const auto viewLevelCount = std::min(descriptor.lastLevel, descriptor.mipCount - 1u) - viewBase + 1u;
         const auto viewLayerCount = geometry.imageLayers - descriptor.baseArray;
         if (descriptor.dimension == TextureDimension::kCube) {
             Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
@@ -483,9 +497,10 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         viewInfo.viewType = ViewTypeFor(descriptor.dimension, viewLayerCount);
         viewInfo.format = vkFormat;
         viewInfo.components = depthCompare ? VkComponentMapping{} : components;
-        viewInfo.subresourceRange = {aspect, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
+        viewInfo.subresourceRange = {aspect, viewBase - skip, viewLevelCount, descriptor.baseArray, viewLayerCount};
         VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
         ChainMinLod(context, descriptor, viewInfo, minLod);
+        if (skip != 0u) minLod.minLod = std::max(minLod.minLod - static_cast<float>(skip), 0.0f);
 
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView");
         createFirstLayerView(descriptor, viewInfo);

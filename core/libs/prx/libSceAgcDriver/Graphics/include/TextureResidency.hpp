@@ -69,6 +69,23 @@ ResidencyPressure PressureOf(const ResidencyUsage& usage, const ResidencyLimits&
 ResidencyWindow MakeResidencyWindow(std::uint64_t now, std::uint64_t idleFrameStart, std::uint64_t currentFrameStart, std::uint64_t minIdleTicks);
 std::uint64_t DeviceHardLimit(const DeviceMemoryBudget& budget, std::uint64_t heapBytes, std::uint64_t cacheDeviceBytes);
 std::uint64_t DeviceSoftLimit(const DeviceMemoryBudget& budget, std::uint64_t heapBytes, std::uint64_t numerator, std::uint64_t denominator, std::optional<std::uint64_t> overrideBytes);
+// The opt-in texture quality cap. Setting APS5_TEXTURE_SKIP_TOP_MIP_MIB=<MiB> keeps the top mip of every sampled 2D or 2D
+// array texture larger than that many MiB (guest size) off the GPU, so the image holds a quarter of the memory and its
+// sampled detail drops by one level. Unset, empty, zero or not a number: off.
+struct TopMipFacts {
+    bool depthCompare = false;
+    bool twoDimensional = false;
+    std::uint32_t mipCount = 0;
+    std::uint32_t lastLevel = 0;
+    std::uint64_t guestBytes = 0;
+};
+// The threshold in bytes for a setting's text, or nullopt when the cap is off.
+std::optional<std::uint64_t> ParseTopMipSkip(const char* text);
+// The threshold from APS5_TEXTURE_SKIP_TOP_MIP_MIB, read once.
+std::optional<std::uint64_t> TopMipSkipBytes();
+// How many top mips to leave off the image: 1 for a texture larger than the threshold that has a lower level its view reaches, else 0.
+std::uint32_t TopMipsToSkip(const TopMipFacts& facts, std::optional<std::uint64_t> thresholdBytes);
+
 // The bytes the cache charges a sampled texture: what its image holds on the device (`allocationBytes`, 0 when the
 // texture does not know it), else the guest surface's size.
 std::uint64_t ChargedTextureBytes(std::uint64_t guestBytes, std::uint64_t allocationBytes);
