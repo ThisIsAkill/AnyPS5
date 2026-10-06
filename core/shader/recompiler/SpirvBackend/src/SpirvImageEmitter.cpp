@@ -970,7 +970,7 @@ void EmitEmulatedCompareSample(SpirvValueEmitContext& ctx, const ImageEmitAccess
         case 2u: return Select(state, f32, Binary(state, spv::OpFOrdEqual, TypeBool(state), reference, red), one, zero);
         case 3u: return Select(state, f32, Binary(state, spv::OpFOrdLessThanEqual, TypeBool(state), reference, red), one, zero);
         case 4u: return Select(state, f32, Binary(state, spv::OpFOrdGreaterThan, TypeBool(state), reference, red), one, zero);
-        case 5u: return Select(state, f32, Binary(state, spv::OpFOrdNotEqual, TypeBool(state), reference, red), one, zero);
+        case 5u: return Select(state, f32, Binary(state, spv::OpFUnordNotEqual, TypeBool(state), reference, red), one, zero);
         case 6u: return Select(state, f32, Binary(state, spv::OpFOrdGreaterThanEqual, TypeBool(state), reference, red), one, zero);
         default: return one;
         }
