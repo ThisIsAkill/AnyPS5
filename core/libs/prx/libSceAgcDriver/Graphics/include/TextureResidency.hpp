@@ -69,6 +69,9 @@ ResidencyPressure PressureOf(const ResidencyUsage& usage, const ResidencyLimits&
 ResidencyWindow MakeResidencyWindow(std::uint64_t now, std::uint64_t idleFrameStart, std::uint64_t currentFrameStart, std::uint64_t minIdleTicks);
 std::uint64_t DeviceHardLimit(const DeviceMemoryBudget& budget, std::uint64_t heapBytes, std::uint64_t cacheDeviceBytes);
 std::uint64_t DeviceSoftLimit(const DeviceMemoryBudget& budget, std::uint64_t heapBytes, std::uint64_t numerator, std::uint64_t denominator, std::optional<std::uint64_t> overrideBytes);
+// The bytes the cache charges a sampled texture: what its image holds on the device (`allocationBytes`, 0 when the
+// texture does not know it), else the guest surface's size.
+std::uint64_t ChargedTextureBytes(std::uint64_t guestBytes, std::uint64_t allocationBytes);
 std::uint64_t HostSoftLimit(std::uint64_t physicalBytes, std::optional<std::uint64_t> overrideBytes);
 DeviceMemoryBudget QueryDeviceMemoryBudget(const Context& context);
 std::uint64_t DeviceLocalHeapBytes(const Context& context);

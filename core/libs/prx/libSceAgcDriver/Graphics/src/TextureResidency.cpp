@@ -84,6 +84,10 @@ std::uint64_t DeviceHardLimit(const DeviceMemoryBudget& budget, std::uint64_t he
     return ceiling > taken ? ceiling - taken : 0;
 }
 
+std::uint64_t ChargedTextureBytes(std::uint64_t guestBytes, std::uint64_t allocationBytes) {
+    return allocationBytes != 0 ? allocationBytes : guestBytes;
+}
+
 std::uint64_t DeviceSoftLimit(const DeviceMemoryBudget& budget, std::uint64_t heapBytes, std::uint64_t numerator, std::uint64_t denominator, std::optional<std::uint64_t> overrideBytes) {
     if (overrideBytes.has_value()) return *overrideBytes;
     const auto base = budget.reported && budget.budget != 0 ? budget.budget : heapBytes;

@@ -262,7 +262,14 @@ void LimitsFollowTheDriverBudget() {
 
 }
 
+void ChargedBytes() {
+    Expect(ChargedTextureBytes(64 * MiB, 16 * MiB) == 16 * MiB, "a texture is charged the bytes its image holds, not the guest surface's size");
+    Expect(ChargedTextureBytes(64 * MiB, 80 * MiB) == 80 * MiB, "a texture larger on the device than in the guest is charged its allocation");
+    Expect(ChargedTextureBytes(64 * MiB, 0) == 64 * MiB, "a texture that does not know its allocation is charged the guest size");
+}
+
 int main() {
+    ChargedBytes();
     NeverEvictsEntriesUsedThisFrame();
     EvictsOnlyAgedEntriesUnderSoftPressure();
     StopsOnceUnderBudget();
