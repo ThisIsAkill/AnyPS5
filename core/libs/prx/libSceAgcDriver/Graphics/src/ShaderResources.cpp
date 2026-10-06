@@ -662,7 +662,6 @@ std::shared_ptr<Texture> cachedTextureLookup(const Context& context, std::span<c
             std::fprintf(stderr, "[texture] 0x%llx %ux%u format %u tile %d: %zu of %zu sampled bytes nonzero\n", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, resource.format, static_cast<int>(resource.tileMode), nonzero, entry.bytes.size() / 64);
         }
         entry.texture = makeWithSampledMemory(cache, [&] { return std::make_shared<Texture>(context, *context.detiler, resource, components, entry.bytes, depthCompare); });
-        // The cache is charged what the image holds on the device, not the guest surface's size.
         entry.accounted = ChargedTextureBytes(entry.accounted, static_cast<std::uint64_t>(entry.texture->AllocationBytes()));
         counters.snapshots.fetch_add(1, std::memory_order_relaxed);
     }

@@ -309,9 +309,6 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         Require(arrayLayers == 0 || sliceLinearBytes <= UINT64_MAX / arrayLayers, "detiled texture buffer size overflows");
         const auto linearBytes = sliceLinearBytes * arrayLayers;
 
-        // APS5_TEXTURE_SKIP_TOP_MIP_MIB (off by default, see TopMipsToSkip): a large 2D or 2D array texture whose view reaches
-        // a lower level starts at guest level 1, so its image holds a quarter of the memory; the view's levels and the
-        // sampler's minimum LOD move down by one. A shader's texture size query then reports the reduced size.
         const std::uint32_t skip = TopMipsToSkip({depthCompare, descriptor.dimension == TextureDimension::k2D || descriptor.dimension == TextureDimension::k2DArray,
             descriptor.mipCount, descriptor.lastLevel, static_cast<std::uint64_t>(guestBytes)}, TopMipSkipBytes());
         if (skip != 0u) {
